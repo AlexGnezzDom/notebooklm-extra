@@ -53,7 +53,7 @@ npm install -g notebooklm-mcp
 ### 2. Этот пакет
 
 ```bash
-git clone https://github.com/USERNAME/notebooklm-extra.git
+git clone https://github.com/AlexGnezzDom/notebooklm-extra.git
 cd notebooklm-extra
 npm install
 ```

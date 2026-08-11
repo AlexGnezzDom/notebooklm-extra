@@ -35,5 +35,13 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "patchright": "^1.48.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AlexGnezzDom/notebooklm-extra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AlexGnezzDom/notebooklm-extra/issues"
+  },
+  "homepage": "https://github.com/AlexGnezzDom/notebooklm-extra#readme"
 }
