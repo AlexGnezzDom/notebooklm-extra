@@ -1,0 +1,39 @@
+{
+  "name": "notebooklm-extra",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP-сервер для Google NotebookLM: чтение и массовая выгрузка источников, работа с артефактами Студии (ментальные карты, отчёты, карточки, тесты). Дополняет notebooklm-mcp.",
+  "main": "src/index.mjs",
+  "bin": {
+    "notebooklm-extra": "src/index.mjs"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node src/index.mjs",
+    "probe": "node tools/probe-ui.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "notebooklm",
+    "gemini-notebook",
+    "claude",
+    "claude-code",
+    "ai",
+    "knowledge-base",
+    "mindmap"
+  ],
+  "author": "Alex GnezzDom",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "patchright": "^1.48.2"
+  }
+}

@@ -1,0 +1,194 @@
+# notebooklm-extra
+
+**MCP-сервер для Google NotebookLM (Gemini Notebook): читает и массово выгружает содержимое источников, работает с артефактами Студии.**
+
+> *MCP server for Google NotebookLM — read and bulk-export source contents, manage Studio artifacts (mind maps, reports, flashcards, quizzes). Complements [notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp).*
+
+---
+
+## Зачем это нужно
+
+У NotebookLM **нет публичного API** — есть только Enterprise-версия, требующая Google Cloud и лицензию Gemini Enterprise. Поэтому доступ к личному блокноту возможен лишь через браузерную автоматизацию.
+
+Базовый сервер [`notebooklm-mcp`](https://github.com/PleasePrompto/notebooklm-mcp) умеет задавать вопросы с цитатами, добавлять источники и генерировать Audio Overview. Но он **не умеет**:
+
+- прочитать текст источника,
+- выгрузить содержимое блокнота на диск,
+- создать ментальную карту, отчёт, карточки или тест.
+
+Этот пакет закрывает пробел. Оригинал при этом **не патчится** — работает рядом.
+
+## Что умеет
+
+| Инструмент | Назначение |
+|---|---|
+| `nlm_health` | Проверка реального доступа к блокноту |
+| `nlm_list_sources` | Список всех источников с номерами |
+| `nlm_read_source` | Полный текст одного источника |
+| `nlm_download_notebook` | Выгрузка всех источников в `.md`-файлы |
+| `nlm_list_artifacts` | Список артефактов Студии |
+| `nlm_create_artifact` | Создание артефакта (9 типов) |
+
+**Типы артефактов:** Ментальная карта · Отчёты · Карточки · Тест · Инфографика · Таблица данных · Презентация · Аудиопересказ · Видеопересказ
+
+---
+
+## Требования
+
+- **Node.js 20+**
+- **Google Chrome** (используется реальный браузер)
+- **[notebooklm-mcp](https://github.com/PleasePrompto/notebooklm-mcp)** — из него берётся авторизованный профиль
+- Аккаунт Google с доступом к NotebookLM
+
+## Установка
+
+### 1. Базовый сервер и авторизация
+
+```bash
+npm install -g notebooklm-mcp
+```
+
+Подключите его к своему MCP-клиенту и вызовите инструмент `setup_auth` — откроется браузер, войдите в Google. Профиль сохранится, повторный вход не потребуется.
+
+### 2. Этот пакет
+
+```bash
+git clone https://github.com/USERNAME/notebooklm-extra.git
+cd notebooklm-extra
+npm install
+```
+
+### 3. Подключение к клиенту
+
+**Claude Code** — в `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "notebooklm-extra": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/абсолютный/путь/notebooklm-extra/src/index.mjs"]
+    }
+  }
+}
+```
+
+**Claude Desktop** — в `claude_desktop_config.json`, блок `mcpServers` тот же.
+
+Перезапустите клиент.
+
+---
+
+## Использование
+
+Естественным языком — клиент сам подберёт инструмент:
+
+```
+Покажи источники блокнота https://notebooklm.google.com/notebook/<uuid>
+
+Прочитай источник №5
+
+Выгрузи весь блокнот в файлы
+
+Создай ментальную карту по блокноту
+```
+
+### Пример: выгрузка
+
+```json
+{
+  "name": "nlm_download_notebook",
+  "arguments": {
+    "notebook_url": "https://notebooklm.google.com/notebook/<uuid>",
+    "limit": 5
+  }
+}
+```
+
+Результат — папка `downloads/notebook_YYYY-MM-DD/` с `.md`-файлами и `_index.md`.
+
+---
+
+## Настройка (переменные окружения)
+
+| Переменная | По умолчанию | Что делает |
+|---|---|---|
+| `NLM_SOURCE_PROFILE` | автоопределение | Путь к профилю `notebooklm-mcp` |
+| `NLM_WORK_PROFILE` | `./profile` | Рабочая копия профиля |
+| `NLM_OUT_DIR` | `./downloads` | Куда сохранять выгрузки |
+| `NLM_HEADLESS` | `true` | `false` — показывать окно браузера |
+| `NLM_SETTLE_DELAY` | `5500` | Пауза после загрузки страницы, мс |
+| `NLM_READ_DELAY` | `3500` | Пауза после клика по источнику, мс |
+
+На медленном соединении увеличьте задержки.
+
+---
+
+## Как это устроено
+
+```
+notebooklm-mcp (профиль с куками)
+        │  копирование перед каждым запуском
+        ▼
+   profile/ (рабочая копия)
+        │
+        ▼
+  Chrome (Patchright) ──► notebooklm.google.com
+```
+
+**Почему копия профиля.** Chrome не допускает два процесса на одном профиле (`SingletonLock`). Базовый сервер держит свой профиль занятым, поэтому мы работаем с копией, синхронизируя куки перед стартом.
+
+---
+
+## ⚠️ Ограничения и риски
+
+**Это браузерная автоматизация, а не API.** Отсюда следствия:
+
+- **Хрупкость.** При редизайне NotebookLM селекторы ломаются. Чинится — см. ниже.
+- **Скорость.** ~5–10 сек на источник. Блокнот из 50 источников выгружается 5–9 минут.
+- **Условия Google.** Автоматизация интерфейса может противоречить [Google Terms of Service](https://policies.google.com/terms). Используйте на свой риск и только со своими данными.
+- **Лимиты.** Бесплатный тариф NotebookLM: 50 запросов/день, 100 блокнотов, 50 источников на блокнот.
+- **`nlm_create_artifact` запускает генерацию, но не ждёт результата** (1–10 мин). Проверяйте через `nlm_list_artifacts`.
+
+### 🔐 Безопасность
+
+Папка `profile/` содержит **cookies вашего Google-аккаунта**. Она в `.gitignore` — **никогда не коммитьте её и не передавайте третьим лицам**. То же касается `downloads/` — там ваши данные.
+
+---
+
+## Починка селекторов
+
+Если после обновления NotebookLM инструменты перестали находить элементы:
+
+```bash
+NLM_HEADLESS=false node tools/probe-ui.mjs "https://notebooklm.google.com/notebook/<uuid>"
+```
+
+Скрипт покажет структуру DOM и кандидатов на селекторы. Обновите блок `SEL` в [`src/config.mjs`](src/config.mjs).
+
+Текущие селекторы:
+
+```js
+sourceRow:   ".single-source-container"   // строка источника
+artifactItem: "artifact-library-item"     // артефакт Студии
+docViewer:   "labs-tailwind-doc-viewer"   // просмотр документа
+```
+
+## Диагностика
+
+| Симптом | Причина и решение |
+|---|---|
+| `Профиль notebooklm-mcp не найден` | Установите базовый пакет и вызовите `setup_auth`, либо задайте `NLM_SOURCE_PROFILE` |
+| `Не авторизован` | Сессия истекла — повторите `setup_auth` |
+| `Failed to create ProcessSingleton` | Копия профиля занята: закройте зависшие Chrome (`pkill -f notebooklm`) |
+| Пустой список источников | Вёрстка изменилась — см. «Починку селекторов» |
+| `Кнопка «…» не найдена в Студии` | Другой язык интерфейса — переключите NotebookLM на русский или английский |
+
+---
+
+## Лицензия
+
+[MIT](LICENSE) © Alex GnezzDom
+
+Проект не связан с Google. NotebookLM и Gemini — товарные знаки Google LLC.

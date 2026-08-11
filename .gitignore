@@ -1,0 +1,34 @@
+# ⚠️ КРИТИЧНО: копия Chrome-профиля содержит Google-куки. НИКОГДА не коммитить.
+profile/
+chrome_profile/
+*.SingletonLock
+
+# Выгруженный контент блокнотов — это данные пользователя
+downloads/
+out/
+
+# Артефакты разведки UI (содержат данные конкретного блокнота)
+probe*_report.json
+probe*_screen.png
+probe_labels.txt
+*.png
+
+# Зависимости и сборка
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Окружение
+.env
+.env.local
+
+# ОС и редакторы
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Логи
+*.log
+npm-debug.log*
