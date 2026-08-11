@@ -60,6 +60,8 @@ export const CONFIG = {
 export const SEL = {
   sourceRow: ".single-source-container",
   artifactItem: "artifact-library-item",
+  /** Название артефакта — отдельный узел внутри карточки */
+  artifactTitle: ".title-container",
   docViewer: "labs-tailwind-doc-viewer",
   /** Кнопки создания артефактов в Студии — это div с aria-label, НЕ <button> */
   createArtifactBtn: ".create-artifact-button-container",

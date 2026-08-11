@@ -39,6 +39,18 @@ async function listSources(page) {
   );
 }
 
+/**
+ * Открытый источник ЗАМЕНЯЕТ собой список в панели, а кнопки «назад» в
+ * интерфейсе нет. Поэтому перед каждым чтением восстанавливаем список
+ * перезаходом на страницу блокнота — иначе всё после первого источника
+ * падает с «не найден (всего 0)».
+ */
+async function ensureSourceList(page, url) {
+  if ((await page.locator(SEL.sourceRow).count()) === 0) {
+    await openNotebook(page, url);
+  }
+}
+
 async function readSource(page, index) {
   const rows = page.locator(SEL.sourceRow);
   const total = await rows.count();
@@ -188,6 +200,7 @@ export const handlers = {
       const saved = [];
       for (const s of take) {
         try {
+          await ensureSourceList(page, notebook_url);
           const text = await readSource(page, s.index);
           const file = safeFileName(s.title, s.index);
           await fs.writeFile(path.join(dir, file), `# ${s.title}\n\n${text}\n`, "utf-8");
@@ -224,7 +237,7 @@ export const handlers = {
     return withPage(async (page) => {
       await openNotebook(page, notebook_url);
       const artifacts = await page.evaluate(
-        ({ sel, iconSrc }) => {
+        ({ sel, titleSel, iconSrc }) => {
           const ICON = new RegExp(iconSrc);
           return [...document.querySelectorAll(sel)]
             .map((el) => {
@@ -232,13 +245,20 @@ export const handlers = {
                 .split("\n")
                 .map((s) => s.trim())
                 .filter(Boolean);
-              const title = lines.find((l) => !ICON.test(l)) || lines[0] || "";
+              // Название лежит в отдельном узле. Без него первой не-иконкой
+              // окажется бейдж «Не прочитано», а не имя артефакта.
+              const title =
+                el.querySelector(titleSel)?.innerText?.trim() ||
+                lines.find((l) => !ICON.test(l)) ||
+                "";
               const kind = ICON.test(lines[0] || "") ? lines[0] : "";
-              return { title, kind, meta: lines[lines.length - 1] || "" };
+              // строка с числом источников и временем создания
+              const meta = lines.find((l) => /·/.test(l)) || "";
+              return { title, kind, meta };
             })
             .filter((x) => x.title);
         },
-        { sel: SEL.artifactItem, iconSrc: ICON_RE.source }
+        { sel: SEL.artifactItem, titleSel: SEL.artifactTitle, iconSrc: ICON_RE.source }
       );
       return { count: artifacts.length, artifacts };
     });
@@ -286,17 +306,27 @@ export const handlers = {
 
       await page.waitForTimeout(4000);
 
-      // некоторые типы открывают диалог с подтверждением
-      const confirm = page
-        .locator(
-          'button:has-text("Создать"), button:has-text("Сгенерировать"), ' +
-            'button:has-text("Generate"), button:has-text("Create")'
-        )
-        .first();
-      if (await confirm.count()) {
-        await confirm.click().catch(() => {});
-        await page.waitForTimeout(3000);
+      // Клик открывает панель настроек (у кнопок стрелка chevron_forward),
+      // а не запускает генерацию — её надо подтвердить отдельно.
+      //
+      // Совпадение ТОЛЬКО точное: has-text("Создать") цепляет «Создать
+      // блокнот» в шапке, и вместо карты создаётся новый блокнот.
+      let confirmed = false;
+      for (const name of ["Сгенерировать", "Generate", "Создать", "Create"]) {
+        const btn = page.getByRole("button", { name, exact: true }).first();
+        if (await btn.count()) {
+          await btn.click().catch(() => {});
+          confirmed = true;
+          break;
+        }
       }
+      if (!confirmed) {
+        throw new Error(
+          `Панель «${type}» открылась, но кнопка подтверждения не найдена — ` +
+            `генерация не запущена. Похоже, изменилась вёрстка Студии.`
+        );
+      }
+      await page.waitForTimeout(8000);
 
       const after = await page.evaluate(
         (sel) => document.querySelectorAll(sel).length,
