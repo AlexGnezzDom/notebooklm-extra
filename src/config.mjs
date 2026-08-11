@@ -61,6 +61,8 @@ export const SEL = {
   sourceRow: ".single-source-container",
   artifactItem: "artifact-library-item",
   docViewer: "labs-tailwind-doc-viewer",
+  /** Кнопки создания артефактов в Студии — это div с aria-label, НЕ <button> */
+  createArtifactBtn: ".create-artifact-button-container",
 };
 
 /** Типы артефактов панели «Студия» */

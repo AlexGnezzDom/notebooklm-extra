@@ -8,21 +8,35 @@ import { CONFIG, SEL, STUDIO_TYPES, STUDIO_TYPES_EN } from "./config.mjs";
 
 // ── Вспомогательные ───────────────────────────────────────────
 
+/**
+ * Первая строка карточки — это лигатура Material Symbols (имя иконки),
+ * например `video_youtube`, `markdown`, `picture_as_pdf`. Такие строки
+ * состоят только из латиницы в нижнем регистре и подчёркиваний, поэтому
+ * распознаём их эвристикой, а не фиксированным списком: иконок десятки,
+ * и в другом блокноте всплывёт та, которой в списке нет.
+ */
+const ICON_RE = /^[a-z][a-z0-9_]{2,29}$/;
+
 async function listSources(page) {
-  return page.evaluate((sel) => {
-    return [...document.querySelectorAll(sel)]
-      .map((row, i) => {
-        const lines = (row.innerText || "")
-          .split("\n")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        // первая строка иногда — имя иконки шрифта (markdown, picture_as_pdf…)
-        const ICON = /^(markdown|picture_as_pdf|link|description|note|text_snippet|flowchart|videocam|mic)$/i;
-        const title = lines.find((l) => !ICON.test(l)) || lines[0] || "";
-        return { index: i, title: title.slice(0, 200) };
-      })
-      .filter((x) => x.title);
-  }, SEL.sourceRow);
+  return page.evaluate(
+    ({ sel, iconSrc }) => {
+      const ICON = new RegExp(iconSrc);
+      return [...document.querySelectorAll(sel)]
+        .map((row, i) => {
+          const lines = (row.innerText || "")
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          // берём первую строку, не похожую на имя иконки
+          const title = lines.find((l) => !ICON.test(l)) || lines[0] || "";
+          // тип источника — если первая строка всё-таки иконка
+          const kind = ICON.test(lines[0] || "") ? lines[0] : "";
+          return { index: i, title: title.slice(0, 200), kind };
+        })
+        .filter((x) => x.title);
+    },
+    { sel: SEL.sourceRow, iconSrc: ICON_RE.source }
+  );
 }
 
 async function readSource(page, index) {
@@ -209,20 +223,23 @@ export const handlers = {
   async nlm_list_artifacts({ notebook_url }) {
     return withPage(async (page) => {
       await openNotebook(page, notebook_url);
-      const artifacts = await page.evaluate((sel) => {
-        return [...document.querySelectorAll(sel)]
-          .map((el) => {
-            const lines = (el.innerText || "")
-              .split("\n")
-              .map((s) => s.trim())
-              .filter(Boolean);
-            const ICON = /^(markdown|flowchart|picture_as_pdf|note|description|quiz|table)$/i;
-            const title = lines.find((l) => !ICON.test(l)) || lines[0] || "";
-            const kind = ICON.test(lines[0] || "") ? lines[0] : "";
-            return { title, kind, meta: lines[lines.length - 1] || "" };
-          })
-          .filter((x) => x.title);
-      }, SEL.artifactItem);
+      const artifacts = await page.evaluate(
+        ({ sel, iconSrc }) => {
+          const ICON = new RegExp(iconSrc);
+          return [...document.querySelectorAll(sel)]
+            .map((el) => {
+              const lines = (el.innerText || "")
+                .split("\n")
+                .map((s) => s.trim())
+                .filter(Boolean);
+              const title = lines.find((l) => !ICON.test(l)) || lines[0] || "";
+              const kind = ICON.test(lines[0] || "") ? lines[0] : "";
+              return { title, kind, meta: lines[lines.length - 1] || "" };
+            })
+            .filter((x) => x.title);
+        },
+        { sel: SEL.artifactItem, iconSrc: ICON_RE.source }
+      );
       return { count: artifacts.length, artifacts };
     });
   },
@@ -236,20 +253,34 @@ export const handlers = {
         SEL.artifactItem
       );
 
-      // ищем кнопку по русскому названию, затем по английскому
+      // Кнопки Студии — div.create-artifact-button-container с aria-label.
+      // Пробуем русское название, затем английское, затем текст внутри.
       const names = [type, STUDIO_TYPES_EN[type]].filter(Boolean);
       let clicked = false;
       for (const n of names) {
-        const btn = page.locator(`button:has-text("${n}")`).first();
-        if (await btn.count()) {
-          await btn.click();
+        const byAria = page.locator(`${SEL.createArtifactBtn}[aria-label="${n}"]`).first();
+        if (await byAria.count()) {
+          await byAria.click();
+          clicked = true;
+          break;
+        }
+        const byText = page.locator(`${SEL.createArtifactBtn}:has-text("${n}")`).first();
+        if (await byText.count()) {
+          await byText.click();
           clicked = true;
           break;
         }
       }
       if (!clicked) {
+        const available = await page.evaluate(
+          (sel) =>
+            [...document.querySelectorAll(sel)]
+              .map((e) => e.getAttribute("aria-label"))
+              .filter(Boolean),
+          SEL.createArtifactBtn
+        );
         throw new Error(
-          `Кнопка «${type}» не найдена в Студии. Возможные причины: другой язык интерфейса или изменилась вёрстка.`
+          `Кнопка «${type}» не найдена. Доступно в Студии: ${available.join(", ") || "(ничего)"}`
         );
       }
 
