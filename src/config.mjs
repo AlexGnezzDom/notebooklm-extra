@@ -50,6 +50,13 @@ export const CONFIG = {
   /** Показывать окно браузера (для отладки) */
   headless: process.env.NLM_HEADLESS !== "false",
 
+  /**
+   * Размер окна в headless. Ниже ~1300px NotebookLM схлопывает колонки
+   * в табы, и список источников перестаёт существовать в DOM.
+   */
+  windowWidth: Number(process.env.NLM_WINDOW_WIDTH || 1600),
+  windowHeight: Number(process.env.NLM_WINDOW_HEIGHT || 1000),
+
   /** Таймауты, мс */
   navTimeout: Number(process.env.NLM_NAV_TIMEOUT || 60000),
   settleDelay: Number(process.env.NLM_SETTLE_DELAY || 5500),

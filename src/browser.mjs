@@ -55,11 +55,19 @@ export async function syncProfile() {
 /** Открывает контекст на рабочей копии профиля и отдаёт страницу в колбэк */
 export async function withPage(fn, { headless = CONFIG.headless } = {}) {
   await syncProfile();
+  // Ширина окна решает всё: на узком экране NotebookLM схлопывает три
+  // колонки в табы «Источники | Чат | Студия», и панель источников просто
+  // не отрисовывается — все инструменты возвращают ноль. В headless окно
+  // по умолчанию 800×600, а --start-maximized там не действует, поэтому
+  // размер задаём явно.
   const ctx = await chromium.launchPersistentContext(CONFIG.workProfile, {
     channel: "chrome",
     headless,
     viewport: null, // окно = вьюпорт, иначе интерфейс «съезжает»
-    args: ["--start-maximized", "--disable-blink-features=AutomationControlled"],
+    args: [
+      headless ? `--window-size=${CONFIG.windowWidth},${CONFIG.windowHeight}` : "--start-maximized",
+      "--disable-blink-features=AutomationControlled",
+    ],
   });
   try {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
@@ -69,19 +77,37 @@ export async function withPage(fn, { headless = CONFIG.headless } = {}) {
   }
 }
 
-/** Переходит в блокнот и проверяет, что не выкинуло на логин */
-export async function openNotebook(page, url) {
-  if (!/^https:\/\/notebooklm\.google\.com\/notebook\//.test(url)) {
+/**
+ * Google переименовал продукт в Gemini Notebook и перевёл его на домен
+ * notebook.google.com; старый notebooklm.google.com отдаёт 301. Принимаем
+ * оба написания и ходим сразу на новый адрес, чтобы не гонять редирект.
+ */
+const NOTEBOOK_URL_RE =
+  /^https:\/\/notebook(lm)?\.google\.com\/notebook\/[\w-]+/;
+
+export function normalizeNotebookUrl(url) {
+  if (!NOTEBOOK_URL_RE.test(url)) {
     throw new Error(
-      "Ожидается ссылка вида https://notebooklm.google.com/notebook/<uuid>"
+      "Ожидается ссылка вида https://notebook.google.com/notebook/<uuid> " +
+        "(старый домен notebooklm.google.com тоже принимается)"
     );
   }
+  return url.replace("://notebooklm.google.com", "://notebook.google.com");
+}
+
+/** Переходит в блокнот и проверяет, что не выкинуло на логин */
+export async function openNotebook(page, url) {
+  url = normalizeNotebookUrl(url);
   await page.goto(url, {
     waitUntil: "domcontentloaded",
     timeout: CONFIG.navTimeout,
   });
   await page.waitForTimeout(CONFIG.settleDelay);
-  if (page.url().includes("accounts.google.com")) {
+  // Логин живёт и на accounts.google.com, и на notebook.google.com/login —
+  // без второй проверки протухшие куки вернут содержимое страницы входа
+  // вместо честной ошибки.
+  const at = page.url();
+  if (at.includes("accounts.google.com") || /\/login\b/.test(at)) {
     throw new Error(
       "Не авторизован. Запусти setup_auth в notebooklm-mcp и войди в Google-аккаунт."
     );
