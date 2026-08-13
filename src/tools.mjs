@@ -3,7 +3,7 @@
  */
 import fs from "fs/promises";
 import path from "path";
-import { withPage, openNotebook } from "./browser.mjs";
+import { withPage, openNotebook, setupAuth } from "./browser.mjs";
 import { CONFIG, SEL, STUDIO_TYPES, STUDIO_TYPES_EN } from "./config.mjs";
 
 // ── Вспомогательные ───────────────────────────────────────────
@@ -73,6 +73,112 @@ async function readSource(page, index) {
   }, SEL.docViewer);
 }
 
+/**
+ * Промежуточные статусы генерации. Базовый notebooklm-mcp снимает текст
+ * сразу и возвращает вот это вместо ответа.
+ */
+const PENDING_RE =
+  /^(поиск ответов|выполнен поиск|создаю|генерирую|думаю|searching|searched|generating|thinking)/i;
+
+/** Подписи кнопок карточки ответа — в текст ответа они не входят */
+const CHAT_UI_RE =
+  /^(thoughts|expand_more|expand_less|сохранить в заметке|save to note|показать|скрыть)$/i;
+
+/**
+ * Карточка ответа несёт на себе панель кнопок и блок «Thoughts». Снимаем
+ * их, иначе они попадают в ответ вперемешку с текстом.
+ */
+function cleanAnswer(raw) {
+  const lines = raw.split("\n").map((s) => s.trim());
+  const kept = lines.filter(
+    (l) =>
+      l &&
+      !ICON_RE.test(l) && // лигатуры иконок: keep_pin, copy_all, thumb_up
+      !CHAT_UI_RE.test(l) &&
+      !/^\d{1,3}$/.test(l) // сноски-номера источников: без интерактива бесполезны
+  );
+  // Сноска стояла в середине предложения, поэтому после её удаления знак
+  // препинания остаётся сиротой в начале строки — возвращаем его на место.
+  const glued = [];
+  for (const line of kept) {
+    if (glued.length && /^[.,;:!?)»…]/.test(line)) {
+      glued[glued.length - 1] += line;
+    } else {
+      glued.push(line);
+    }
+  }
+  return glued.join("\n").trim();
+}
+
+/**
+ * Ждём КОНЕЦ генерации по стабилизации текста, а не по спиннеру: индикатор
+ * — это конкретный элемент вёрстки, он переживёт не каждый редизайн, а
+ * «текст перестал расти» верно всегда.
+ */
+async function askQuestion(page, question, { timeoutMs = 180000 } = {}) {
+  // Чат подгружается отдельно от остальной страницы и иногда отстаёт от
+  // общей паузы — ждём именно его, а не проверяем наличие мгновенно.
+  const box = page.locator(SEL.chatInput).last();
+  try {
+    await box.waitFor({ state: "visible", timeout: 30000 });
+  } catch {
+    throw new Error(
+      "Поле чата не появилось за 30 сек. Либо очень медленная сеть, либо изменилась вёрстка."
+    );
+  }
+  const before = await page.locator(SEL.chatMessage).count();
+
+  await box.click();
+  await box.fill(question);
+  await page.keyboard.press("Enter");
+
+  /**
+   * Признак готовности — панель оценки под ответом: она появляется только
+   * когда генерация закончена. Ловить статусы по тексту бесполезно, их
+   * формулировки меняются («Поиск ответов…», «Выполнен поиск в ваших
+   * источниках…»), а панель есть либо нет.
+   */
+  const readLast = () =>
+    page.evaluate((sel) => {
+      const all = [...document.querySelectorAll(sel)];
+      const last = all[all.length - 1];
+      if (!last) return { text: "", done: false };
+      const done = !!last.querySelector(
+        'button[aria-label*="Хороший"], button[aria-label*="Плохой"], ' +
+          'button[aria-label*="thumb"], [data-test-id*="thumb"]'
+      );
+      return { text: (last.innerText || "").trim(), done };
+    }, SEL.chatMessage);
+
+  const deadline = Date.now() + timeoutMs;
+  let prev = "";
+  let stableFor = 0;
+
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(2500);
+    // до появления нового сообщения читать нечего
+    if ((await page.locator(SEL.chatMessage).count()) <= before) continue;
+
+    const { text, done } = await readLast();
+    if (!text || PENDING_RE.test(text)) {
+      prev = "";
+      stableFor = 0;
+      continue;
+    }
+    if (done) return cleanAnswer(text);
+
+    // Страховка на случай, если панель оценки переедет при редизайне:
+    // три одинаковых замера подряд (~7.5 сек) тоже считаем концом.
+    stableFor = text === prev ? stableFor + 1 : 0;
+    prev = text;
+    if (stableFor >= 4) return cleanAnswer(text);
+  }
+  throw new Error(
+    `Ответ не пришёл за ${Math.round(timeoutMs / 1000)} сек. ` +
+      `Либо вопрос слишком тяжёлый, либо NotebookLM упёрся в дневной лимит.`
+  );
+}
+
 function safeFileName(title, i) {
   const base =
     title.replace(/[^\p{L}\p{N}._ -]/gu, "").trim().slice(0, 80) || `source_${i}`;
@@ -82,6 +188,44 @@ function safeFileName(title, i) {
 // ── Описания инструментов ─────────────────────────────────────
 
 export const TOOLS = [
+  {
+    name: "nlm_setup_auth",
+    description:
+      "Разовый вход в Google: открывает окно браузера, ждёт логина и сохраняет профиль. Вызывать при первом запуске и когда сессия истекла.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        timeout_sec: { type: "number", description: "Сколько ждать входа (по умолчанию 300)" },
+      },
+    },
+  },
+  {
+    name: "nlm_ask",
+    description:
+      "Задать вопрос блокноту и дождаться полного ответа Gemini по источникам. Ждёт окончания генерации, а не промежуточного статуса.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        notebook_url: { type: "string" },
+        question: { type: "string", description: "Вопрос на любом языке" },
+        timeout_sec: { type: "number", description: "Ожидание ответа (по умолчанию 180)" },
+      },
+      required: ["notebook_url", "question"],
+    },
+  },
+  {
+    name: "nlm_add_source",
+    description:
+      "Добавить в блокнот источник по ссылке (сайт, YouTube). Индексация занимает 5–30 секунд.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        notebook_url: { type: "string" },
+        url: { type: "string", description: "Ссылка на страницу или видео" },
+      },
+      required: ["notebook_url", "url"],
+    },
+  },
   {
     name: "nlm_health",
     description:
@@ -159,6 +303,64 @@ export const TOOLS = [
 // ── Обработчики ───────────────────────────────────────────────
 
 export const handlers = {
+  async nlm_setup_auth({ timeout_sec = 300 } = {}) {
+    return setupAuth({ timeoutMs: timeout_sec * 1000 });
+  },
+
+  async nlm_ask({ notebook_url, question, timeout_sec = 180 }) {
+    return withPage(async (page) => {
+      await openNotebook(page, notebook_url);
+      const answer = await askQuestion(page, question, { timeoutMs: timeout_sec * 1000 });
+      return { question, answer, length: answer.length };
+    });
+  },
+
+  async nlm_add_source({ notebook_url, url }) {
+    return withPage(async (page) => {
+      await openNotebook(page, notebook_url);
+      const before = await page.locator(SEL.sourceRow).count();
+
+      const addBtn = page
+        .getByRole("button", { name: /Добавить источник|Add source/i })
+        .first();
+      if (!(await addBtn.count())) throw new Error("Кнопка «Добавить источники» не найдена.");
+      await addBtn.click();
+      await page.waitForTimeout(2500);
+
+      // Тип источника выбирается вкладкой «Веб-сайт» / «YouTube»
+      const tab = page
+        .getByRole("button", { name: /YouTube/i })
+        .or(page.getByRole("button", { name: /Веб-сайт|Website/i }))
+        .first();
+      if (await tab.count()) {
+        await tab.click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
+
+      const field = page.locator(SEL.urlInput).first();
+      if (!(await field.count())) throw new Error("Поле для ссылки не найдено.");
+      await field.fill(url);
+
+      for (const name of ["Вставить", "Добавить", "Insert", "Add"]) {
+        const btn = page.getByRole("button", { name, exact: true }).first();
+        if (await btn.count()) {
+          await btn.click().catch(() => {});
+          break;
+        }
+      }
+      await page.waitForTimeout(8000);
+
+      const after = await page.locator(SEL.sourceRow).count();
+      return {
+        url,
+        added: after > before,
+        sources_before: before,
+        sources_after: after,
+        note: after > before ? "Индексация занимает 5–30 сек." : "Источник не появился — проверь ссылку.",
+      };
+    });
+  },
+
   async nlm_health({ notebook_url }) {
     return withPage(async (page) => {
       await openNotebook(page, notebook_url);

@@ -12,37 +12,47 @@ export const ROOT = path.resolve(
   ".."
 );
 
-/**
- * Где notebooklm-mcp хранит свой Chrome-профиль.
- * Пакет использует env-paths, поэтому пути различаются по ОС.
- */
-function defaultSourceProfile() {
+/** Каталог данных приложения по правилам ОС */
+function appDataDir(appName) {
   const home = os.homedir();
-  const candidates =
-    process.platform === "darwin"
-      ? [path.join(home, "Library/Application Support/notebooklm-mcp/chrome_profile")]
-      : process.platform === "win32"
-      ? [
-          path.join(process.env.APPDATA || path.join(home, "AppData/Roaming"),
-                    "notebooklm-mcp/chrome_profile"),
-          path.join(process.env.LOCALAPPDATA || path.join(home, "AppData/Local"),
-                    "notebooklm-mcp-nodejs/Data/chrome_profile"),
-        ]
-      : [
-          path.join(process.env.XDG_DATA_HOME || path.join(home, ".local/share"),
-                    "notebooklm-mcp/chrome_profile"),
-          path.join(home, ".config/notebooklm-mcp/chrome_profile"),
-        ];
+  if (process.platform === "darwin") {
+    return path.join(home, "Library/Application Support", appName);
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(home, "AppData/Roaming"), appName);
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(home, ".local/share"), appName);
+}
 
-  return candidates.find((p) => existsSync(p)) || candidates[0];
+/**
+ * Профиль notebooklm-mcp — нужен только для разовой миграции тем, кто
+ * пришёл с него. Своя авторизация (nlm_setup_auth) делает эту зависимость
+ * необязательной.
+ */
+function legacyProfile() {
+  const home = os.homedir();
+  const candidates = [
+    path.join(appDataDir("notebooklm-mcp"), "chrome_profile"),
+    path.join(home, ".config/notebooklm-mcp/chrome_profile"),
+    path.join(process.env.LOCALAPPDATA || path.join(home, "AppData/Local"),
+              "notebooklm-mcp-nodejs/Data/chrome_profile"),
+  ];
+  return candidates.find((p) => existsSync(p)) || null;
 }
 
 export const CONFIG = {
-  /** Профиль-источник (создаётся пакетом notebooklm-mcp при setup_auth) */
-  sourceProfile: process.env.NLM_SOURCE_PROFILE || defaultSourceProfile(),
+  /**
+   * Свой профиль с куками Google — сюда пишет nlm_setup_auth.
+   * Лежит в каталоге данных ОС, а не в папке проекта: репозиторий можно
+   * удалить или переустановить, не потеряв авторизацию.
+   */
+  sourceProfile:
+    process.env.NLM_SOURCE_PROFILE ||
+    path.join(appDataDir("notebooklm-extra"), "chrome_profile"),
 
-  /** Рабочая копия профиля — чтобы не драться за SingletonLock */
-  workProfile: process.env.NLM_WORK_PROFILE || path.join(ROOT, "profile"),
+  /** Профиль notebooklm-mcp — импортируется один раз, если свой пуст */
+  legacyProfile: legacyProfile(),
+
 
   /** Куда складывать выгрузки */
   outDir: process.env.NLM_OUT_DIR || path.join(ROOT, "downloads"),
@@ -72,6 +82,11 @@ export const SEL = {
   docViewer: "labs-tailwind-doc-viewer",
   /** Кнопки создания артефактов в Студии — это div с aria-label, НЕ <button> */
   createArtifactBtn: ".create-artifact-button-container",
+  /** Поле вопроса в чате. Первое такое поле — поиск источников в интернете */
+  chatInput: "textarea.query-box-input",
+  chatMessage: "chat-message",
+  /** Поле «Вставьте ссылку» в диалоге добавления источника */
+  urlInput: 'input[type="url"], input[formcontrolname="url"]',
 };
 
 /** Типы артефактов панели «Студия» */

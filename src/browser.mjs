@@ -33,34 +33,58 @@ async function copyProfile(src, dst) {
   }
 }
 
-/** Синхронизирует куки из профиля notebooklm-mcp в рабочую копию */
-export async function syncProfile() {
-  const { sourceProfile, workProfile } = CONFIG;
+/**
+ * Готовит профиль к работе и отдаёт путь к нему.
+ *
+ * Работаем с ОРИГИНАЛОМ, а не с копией. Google ротирует куки сессии: копия
+ * получает свежие, оригинал остаётся со старыми — и те становятся
+ * недействительными. Итог: каждый второй запуск требовал повторного входа.
+ */
+export async function prepareProfile() {
+  const { sourceProfile, legacyProfile } = CONFIG;
+
+  // Разовый импорт для тех, кто пришёл с notebooklm-mcp: там уже есть
+  // авторизованный профиль, повторно логиниться незачем.
+  if (!existsSync(sourceProfile) && legacyProfile) {
+    await copyProfile(legacyProfile, sourceProfile);
+  }
+
   if (!existsSync(sourceProfile)) {
     throw new Error(
-      `Профиль notebooklm-mcp не найден: ${sourceProfile}\n` +
-        `Сначала установи и авторизуй базовый сервер:\n` +
-        `  npm i -g notebooklm-mcp   → затем вызови его инструмент setup_auth\n` +
-        `Либо укажи путь вручную: NLM_SOURCE_PROFILE=/путь/к/chrome_profile`
+      `Нет авторизации. Вызови инструмент nlm_setup_auth — откроется окно ` +
+        `Chrome, войди в Google-аккаунт, и профиль сохранится здесь:\n` +
+        `  ${sourceProfile}`
     );
   }
-  await copyProfile(sourceProfile, workProfile);
-  // подчищаем локи, оставшиеся от источника
+  // локи от процессов, убитых не по-хорошему
   for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
-    await fs.rm(path.join(workProfile, f), { force: true }).catch(() => {});
+    await fs.rm(path.join(sourceProfile, f), { force: true }).catch(() => {});
   }
-  return workProfile;
+  return sourceProfile;
 }
 
-/** Открывает контекст на рабочей копии профиля и отдаёт страницу в колбэк */
-export async function withPage(fn, { headless = CONFIG.headless } = {}) {
-  await syncProfile();
+/**
+ * Один профиль — один Chrome за раз. Инструменты вызываются последовательно,
+ * но клиент вправе прислать два запроса разом; без очереди второй упал бы на
+ * ProcessSingleton.
+ */
+let queue = Promise.resolve();
+
+/** Открывает контекст на профиле и отдаёт страницу в колбэк */
+export async function withPage(fn, opts = {}) {
+  const run = queue.then(() => withPageNow(fn, opts));
+  queue = run.catch(() => {}); // ошибка одного вызова не рвёт очередь
+  return run;
+}
+
+async function withPageNow(fn, { headless = CONFIG.headless } = {}) {
+  const profile = await prepareProfile();
   // Ширина окна решает всё: на узком экране NotebookLM схлопывает три
   // колонки в табы «Источники | Чат | Студия», и панель источников просто
   // не отрисовывается — все инструменты возвращают ноль. В headless окно
   // по умолчанию 800×600, а --start-maximized там не действует, поэтому
   // размер задаём явно.
-  const ctx = await chromium.launchPersistentContext(CONFIG.workProfile, {
+  const ctx = await chromium.launchPersistentContext(profile, {
     channel: "chrome",
     headless,
     viewport: null, // окно = вьюпорт, иначе интерфейс «съезжает»
@@ -72,6 +96,49 @@ export async function withPage(fn, { headless = CONFIG.headless } = {}) {
   try {
     const page = ctx.pages()[0] ?? (await ctx.newPage());
     return await fn(page);
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
+
+/**
+ * Разовый вход в Google: открывает видимое окно на СВОЁМ профиле и ждёт,
+ * пока пользователь залогинится. Профиль остаётся в каталоге данных ОС,
+ * поэтому переустановка репозитория авторизацию не сбрасывает.
+ */
+export async function setupAuth({ timeoutMs = 300000 } = {}) {
+  const { sourceProfile } = CONFIG;
+  await fs.mkdir(sourceProfile, { recursive: true });
+  for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    await fs.rm(path.join(sourceProfile, f), { force: true }).catch(() => {});
+  }
+
+  const ctx = await chromium.launchPersistentContext(sourceProfile, {
+    channel: "chrome",
+    headless: false,
+    viewport: null,
+    args: ["--start-maximized", "--disable-blink-features=AutomationControlled"],
+  });
+  try {
+    const page = ctx.pages()[0] ?? (await ctx.newPage());
+    await page.goto("https://notebook.google.com/", { waitUntil: "domcontentloaded" });
+
+    // Ждём, пока адрес перестанет быть страницей входа.
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const at = page.url();
+      const onLogin =
+        at.includes("accounts.google.com") || /notebook\.google\.com\/login/.test(at);
+      if (!onLogin && at.includes("notebook.google.com")) {
+        await page.waitForTimeout(3000); // дать кукам осесть на диск
+        return { authenticated: true, profile: sourceProfile };
+      }
+      await page.waitForTimeout(2000);
+    }
+    throw new Error(
+      `Вход не завершён за ${Math.round(timeoutMs / 1000)} сек. ` +
+        `Запусти nlm_setup_auth заново и войди в аккаунт.`
+    );
   } finally {
     await ctx.close().catch(() => {});
   }
@@ -105,11 +172,20 @@ export async function openNotebook(page, url) {
   await page.waitForTimeout(CONFIG.settleDelay);
   // Логин живёт и на accounts.google.com, и на notebook.google.com/login —
   // без второй проверки протухшие куки вернут содержимое страницы входа
-  // вместо честной ошибки.
-  const at = page.url();
-  if (at.includes("accounts.google.com") || /\/login\b/.test(at)) {
+  // вместо честной ошибки. Но Google умеет уходить на логин на пару секунд
+  // и возвращаться сам, поэтому сразу не сдаёмся: объявлять «сессия истекла»
+  // на таком редиректе — значит гонять пользователя логиниться впустую.
+  const onLogin = () => {
+    const at = page.url();
+    return at.includes("accounts.google.com") || /\/login\b/.test(at);
+  };
+  for (let i = 0; onLogin() && i < 6; i++) {
+    await page.waitForTimeout(2500);
+  }
+  if (onLogin()) {
     throw new Error(
-      "Не авторизован. Запусти setup_auth в notebooklm-mcp и войди в Google-аккаунт."
+      "Сессия Google истекла. Вызови инструмент nlm_setup_auth и войди в аккаунт — " +
+        "откроется окно браузера."
     );
   }
 }
